@@ -83,7 +83,7 @@ void ChatService::login(const TcpConnectionPtr &conn, json &js, Timestamp time)
             // 登录成功，记录用户连接信息
             {
                 lock_guard<mutex> lock(_connMutex);
-                _userConnMap.insert({id, conn});
+                _userConnMap.emplace(id, conn);
             }
 
             // id用户登录成功后，向redis订阅channel(id)
@@ -221,19 +221,21 @@ void ChatService::loginout(const TcpConnectionPtr &conn, json &js, Timestamp tim
 void ChatService::clientCloseException(const TcpConnectionPtr &conn)
 {
     User user;
+        //lock_guard<mutex> lock(_connMutex);
+    for (auto it = _userConnMap.begin(); it != _userConnMap.end(); ++it)
     {
-        lock_guard<mutex> lock(_connMutex);
-        for (auto it = _userConnMap.begin(); it != _userConnMap.end(); ++it)
+        if (it->second.conn == conn)
         {
-            if (it->second == conn)
-            {
                 // 从map表删除用户的链接信息
-                user.setId(it->first);
+            user.setId(it->first);
+            {
+                lock_guard<mutex> lock(it->second.connMutex);
                 _userConnMap.erase(it);
-                break;
             }
+            break;
         }
     }
+
 
     // 用户注销，相当于就是下线，在redis中取消订阅通道
     _redis.unsubscribe(user.getId()); 
@@ -252,12 +254,15 @@ void ChatService::oneChat(const TcpConnectionPtr &conn, json &js, Timestamp time
     int toid = js["toid"].get<int>();
 
     {
-        lock_guard<mutex> lock(_connMutex);
+        //lock_guard<mutex> lock(_connMutex);
         auto it = _userConnMap.find(toid);
         if (it != _userConnMap.end())
         {
             // toid在线，转发消息   服务器主动推送消息给toid用户
-            it->second->send(js.dump());
+            {
+                lock_guard<mutex> lock(it->second.connMutex);
+                it->second.conn->send(js.dump());
+            }
             return;
         }
     }
@@ -315,14 +320,17 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
     int groupid = js["groupid"].get<int>();
     vector<int> useridVec = _groupModel.queryGroupUsers(userid, groupid);
 
-    lock_guard<mutex> lock(_connMutex);
+    //lock_guard<mutex> lock(_connMutex);
     for (int id : useridVec)
     {
         auto it = _userConnMap.find(id);
         if (it != _userConnMap.end())
         {
             // 转发群消息
-            it->second->send(js.dump());
+            {
+                lock_guard<mutex> lock(it->second.connMutex);
+                it->second.conn->send(js.dump());
+            }
         }
         else
         {
@@ -344,11 +352,14 @@ void ChatService::groupChat(const TcpConnectionPtr &conn, json &js, Timestamp ti
 // 从redis消息队列中获取订阅的消息
 void ChatService::handleRedisSubscribeMessage(int userid, string msg)
 {
-    lock_guard<mutex> lock(_connMutex);
+    //lock_guard<mutex> lock(_connMutex);
     auto it = _userConnMap.find(userid);
     if (it != _userConnMap.end())
-    {
-        it->second->send(msg);
+    {    
+        {
+            lock_guard<mutex> lock(it->second.connMutex);
+            it->second.conn->send(msg);
+        }
         return;
     }
 
